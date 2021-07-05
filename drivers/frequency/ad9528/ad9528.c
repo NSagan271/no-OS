@@ -44,6 +44,7 @@
 #include <stdio.h>
 #include "util.h"
 #include "ad9528.h"
+#include "jesd204.h"
 
 static bool ad9528_pll2_valid_calib_div(unsigned int div)
 {
@@ -343,6 +344,17 @@ int32_t ad9528_init(struct ad9528_init_param *init_param)
 	return(0);
 }
 
+static const struct jesd204_dev_data jesd204_ad9528_init = {
+	.sysref_cb = ad9528_jesd204_sysref,
+	.state_ops = {
+		[JESD204_OP_LINK_SUPPORTED] = {
+			.per_link = ad9528_jesd204_link_supported,
+		},
+		[JESD204_OP_LINK_PRE_SETUP] = {
+			.per_link = ad9528_jesd204_link_pre_setup,
+		},
+	},
+};
 
 /***************************************************************************//**
  * @brief Initializes the AD9528.
@@ -367,12 +379,18 @@ int32_t ad9528_setup(struct ad9528_dev **device,
 	uint32_t i;
 	uint32_t pll2_ndiv, pll2_ndiv_a_cnt, pll2_ndiv_b_cnt;
 	struct ad9528_dev *dev;
+	struct jesd204_dev *jdev;
 
 	dev = (struct ad9528_dev *)malloc(sizeof(*dev));
 	if (!dev)
 		return -1;
 
 	dev->pdata = init_param.pdata;
+
+	// TODO: replace return ret; with goto error to fix memory leak.
+	ret = jesd204_dev_register(&jdev, &jesd204_ad9371_init);
+	if (ret < 0)
+		return ret;
 
 	/* SPI */
 	ret = spi_init(&dev->spi_desc, &init_param.spi_init);

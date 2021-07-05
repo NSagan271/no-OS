@@ -65,6 +65,8 @@
 #include "axi_dmac.h"
 #include "app_config.h"
 
+#include "jesd204.h"
+
 #ifdef IIO_SUPPORT
 
 #include "iio.h"
@@ -76,15 +78,52 @@
 #include "uart_extra.h"
 
 #endif // IIO_SUPPORT
-/******************************************************************************/
-/************************ Variables Definitions *******************************/
-/******************************************************************************/
+
 extern ad9528Device_t clockAD9528_;
 extern mykonosDevice_t mykDevice;
 
-/***************************************************************************//**
- * @brief main
-*******************************************************************************/
+struct ad9371_jesd204_priv {
+	struct ad9371_rf_phy *phy;
+	bool has_tx;
+	bool has_rx;
+	bool has_orx;
+};
+
+static const struct jesd204_dev_data jesd204_ad9371_init = {
+	.state_ops = {
+		[JESD204_OP_LINK_INIT] = {
+			.per_link = NULL, //ad9371_jesd204_link_init,
+		},
+		[JESD204_OP_CLOCKS_ENABLE] = {
+			.per_link = NULL, //ad9371_jesd204_clks_enable,
+		},
+		[JESD204_OP_LINK_SETUP] = {
+			.per_device = NULL, //ad9371_jesd204_link_setup,
+			.mode = JESD204_STATE_OP_MODE_PER_DEVICE,
+			.post_state_sysref = true,
+		},
+		[JESD204_OP_LINK_ENABLE] = {
+			.per_link = NULL, //ad9371_jesd204_link_enable,
+			.post_state_sysref = true,
+		},
+		[JESD204_OP_LINK_RUNNING] = {
+			.per_link = NULL, //ad9371_jesd204_link_running,
+		},
+		[JESD204_OP_OPT_SETUP_STAGE1] = {
+			.per_device = NULL, //ad9371_jesd204_setup_stage1,
+			.mode = JESD204_STATE_OP_MODE_PER_DEVICE,
+		},
+		[JESD204_OP_OPT_POST_RUNNING_STAGE] = {
+			.per_device = NULL, //ad9371_jesd204_post_running_stage,
+			.mode = JESD204_STATE_OP_MODE_PER_DEVICE,
+		},
+	},
+
+	.num_retries = 3,
+	.max_num_links = 3,
+	.sizeof_priv = sizeof(struct ad9371_jesd204_priv),
+};
+
 int main(void)
 {
 	ADI_ERR error;
@@ -466,427 +505,13 @@ int main(void)
 		goto error_9;
 	}
 
-	/*************************************************************************/
-	/*****                Mykonos Initialization Sequence                *****/
-	/*************************************************************************/
-
-	/* Perform a hard reset on the MYKONOS DUT (Toggle RESETB pin on device) */
-	if ((mykError = MYKONOS_resetDevice(&mykDevice)) != MYKONOS_ERR_OK) {
-		errorString = getMykonosErrorMessage(mykError);
-		goto error_11;
-	}
-
-	if ((mykError = MYKONOS_initialize(&mykDevice)) != MYKONOS_ERR_OK) {
-		errorString = getMykonosErrorMessage(mykError);
-		goto error_11;
-	}
-
-	/*************************************************************************/
-	/*****                Mykonos CLKPLL Status Check                    *****/
-	/*************************************************************************/
-
-	if ((mykError = MYKONOS_checkPllsLockStatus(&mykDevice,
-			&pllLockStatus)) != MYKONOS_ERR_OK) {
-		errorString = getMykonosErrorMessage(mykError);
-		goto error_11;
-	}
-
-	/*************************************************************************/
-	/*****                Mykonos Perform MultiChip Sync                 *****/
-	/*************************************************************************/
-
-	if ((mykError = MYKONOS_enableMultichipSync(&mykDevice, 1,
-			&mcsStatus)) != MYKONOS_ERR_OK) {
-		errorString = getMykonosErrorMessage(mykError);
-		goto error_11;
-	}
-
-	/* Minimum 3 SYSREF pulses from Clock Device has to be produced for MulticChip Sync */
-
-	AD9528_requestSysref(clockAD9528_device, 1);
-	mdelay(1);
-	AD9528_requestSysref(clockAD9528_device, 1);
-	mdelay(1);
-	AD9528_requestSysref(clockAD9528_device, 1);
-	mdelay(1);
-	AD9528_requestSysref(clockAD9528_device, 1);
-	mdelay(1);
-
-	/*************************************************************************/
-	/*****                Mykonos Verify MultiChip Sync                 *****/
-	/*************************************************************************/
-
-	if ((mykError = MYKONOS_enableMultichipSync(&mykDevice, 0,
-			&mcsStatus)) != MYKONOS_ERR_OK) {
-		errorString = getMykonosErrorMessage(mykError);
-		goto error_11;
-	}
-
-	if ((mcsStatus & 0x0B) == 0x0B)
-		printf("MCS successful\n");
-	else
-		printf("MCS failed\n");
-
-	/*************************************************************************/
-	/*****                Mykonos Load ARM file                          *****/
-	/*************************************************************************/
-
-	if (pllLockStatus & 0x01) {
-		printf("CLKPLL locked\n");
-		if ((mykError = MYKONOS_initArm(&mykDevice)) != MYKONOS_ERR_OK) {
-			errorString = getMykonosErrorMessage(mykError);
-			goto error_11;
-		}
-
-		if ((mykError = MYKONOS_loadArmFromBinary(&mykDevice,
-				&firmware_Mykonos_M3_bin[0], firmware_Mykonos_M3_bin_len)) != MYKONOS_ERR_OK) {
-			errorString = getMykonosErrorMessage(mykError);
-			goto error_11;
-		}
-	} else {
-		printf("CLKPLL not locked (0x%x)\n", pllLockStatus);
-		error = ADIERR_FAILED;
-		goto error_2;
-	}
-
-	/* Read back the version of the ARM binary loaded into the Mykonos ARM memory */
-	if ((mykError = MYKONOS_getArmVersion(&mykDevice, &arm_major, &arm_minor,
-					      &arm_release, NULL)) == MYKONOS_ERR_OK)
-		printf("AD9371 ARM version %d.%d.%d\n", arm_major, arm_minor, arm_release);
-
-	/*************************************************************************/
-	/*****                Mykonos Set RF PLL Frequencies                 *****/
-	/*************************************************************************/
-
-	if ((mykError = MYKONOS_setRfPllFrequency(&mykDevice, RX_PLL,
-			mykDevice.rx->rxPllLoFrequency_Hz)) != MYKONOS_ERR_OK) {
-		errorString = getMykonosErrorMessage(mykError);
-		goto error_11;
-	}
-
-	if ((mykError = MYKONOS_setRfPllFrequency(&mykDevice, TX_PLL,
-			mykDevice.tx->txPllLoFrequency_Hz)) != MYKONOS_ERR_OK) {
-		errorString = getMykonosErrorMessage(mykError);
-		goto error_11;
-	}
-
-	if ((mykError = MYKONOS_setRfPllFrequency(&mykDevice, SNIFFER_PLL,
-			mykDevice.obsRx->snifferPllLoFrequency_Hz)) != MYKONOS_ERR_OK) {
-		errorString = getMykonosErrorMessage(mykError);
-		goto error_11;
-	}
-
-	/* Wait 200ms for PLLs to lock */
-	mdelay(200);
-
-	if ((mykError = MYKONOS_checkPllsLockStatus(&mykDevice,
-			&pllLockStatus)) != MYKONOS_ERR_OK) {
-		errorString = getMykonosErrorMessage(mykError);
-		goto error_11;
-	}
-
-	if ((pllLockStatus & 0x0F) == 0x0F)
-		printf("PLLs locked\n");
-	else {
-		printf("PLLs not locked (0x%x)\n", pllLockStatus);
-		error = ADIERR_FAILED;
-		goto error_2;
-	}
-
-	/*************************************************************************/
-	/*****                Mykonos Set GPIOs                              *****/
-	/*************************************************************************/
-
-	if ((mykGpioErr = MYKONOS_setRx1GainCtrlPin(&mykDevice, 0, 0, 0, 0,
-			  0)) != MYKONOS_ERR_GPIO_OK) {
-		errorString = getGpioMykonosErrorMessage(mykGpioErr);
-		goto error_11;
-	}
-
-	if ((mykGpioErr = MYKONOS_setRx2GainCtrlPin(&mykDevice, 0, 0, 0, 0,
-			  0)) != MYKONOS_ERR_GPIO_OK) {
-		errorString = getGpioMykonosErrorMessage(mykGpioErr);
-		goto error_11;
-	}
-
-	if ((mykGpioErr = MYKONOS_setTx1AttenCtrlPin(&mykDevice, 0, 0, 0, 0,
-			  0)) != MYKONOS_ERR_GPIO_OK) {
-		errorString = getGpioMykonosErrorMessage(mykGpioErr);
-		goto error_11;
-	}
-
-	if ((mykGpioErr = MYKONOS_setTx2AttenCtrlPin(&mykDevice, 0, 0, 0,
-			  0)) != MYKONOS_ERR_GPIO_OK) {
-		errorString = getGpioMykonosErrorMessage(mykGpioErr);
-		goto error_11;
-	}
-
-	if ((mykGpioErr = MYKONOS_setupGpio(&mykDevice)) != MYKONOS_ERR_GPIO_OK) {
-		errorString = getGpioMykonosErrorMessage(mykGpioErr);
-		goto error_11;
-	}
-
-	/*************************************************************************/
-	/*****                Mykonos Set manual gains values                *****/
-	/*************************************************************************/
-
-	if ((mykError = MYKONOS_setRx1ManualGain(&mykDevice, 255)) != MYKONOS_ERR_OK) {
-		errorString = getMykonosErrorMessage(mykError);
-		goto error_11;
-	}
-
-	if ((mykError = MYKONOS_setRx2ManualGain(&mykDevice, 255)) != MYKONOS_ERR_OK) {
-		errorString = getMykonosErrorMessage(mykError);
-		goto error_11;
-	}
-
-	if ((mykError = MYKONOS_setObsRxManualGain(&mykDevice, OBS_RX1_TXLO,
-			255)) != MYKONOS_ERR_OK) {
-		errorString = getMykonosErrorMessage(mykError);
-		goto error_11;
-	}
-
-	if ((mykError = MYKONOS_setObsRxManualGain(&mykDevice, OBS_RX2_TXLO,
-			255)) != MYKONOS_ERR_OK) {
-		errorString = getMykonosErrorMessage(mykError);
-		goto error_11;
-	}
-
-	if ((mykError = MYKONOS_setObsRxManualGain(&mykDevice, OBS_SNIFFER_A,
-			255)) != MYKONOS_ERR_OK) {
-		errorString = getMykonosErrorMessage(mykError);
-		goto error_11;
-	}
-
-	if ((mykError = MYKONOS_setObsRxManualGain(&mykDevice, OBS_SNIFFER_B,
-			255)) != MYKONOS_ERR_OK) {
-		errorString = getMykonosErrorMessage(mykError);
-		goto error_11;
-	}
-
-	if ((mykError = MYKONOS_setObsRxManualGain(&mykDevice, OBS_SNIFFER_C,
-			255)) != MYKONOS_ERR_OK) {
-		errorString = getMykonosErrorMessage(mykError);
-		goto error_11;
-	}
-
-	/*************************************************************************/
-	/*****                Mykonos Initialize attenuations                *****/
-	/*************************************************************************/
-
-	mykError = MYKONOS_setTx1Attenuation(&mykDevice, 10000);
-	if (mykError != MYKONOS_ERR_OK) {
-		errorString = getMykonosErrorMessage(mykError);
-		goto error_11;
-	}
-
-	mykError = MYKONOS_setTx2Attenuation(&mykDevice, 10000);
-	if (mykError != MYKONOS_ERR_OK) {
-		errorString = getMykonosErrorMessage(mykError);
-		goto error_11;
-	}
-
-	/*************************************************************************/
-	/*****           Mykonos ARM Initialization Calibrations             *****/
-	/*************************************************************************/
-
-	if ((mykError = MYKONOS_runInitCals(&mykDevice,
-					    (initCalMask & ~TX_LO_LEAKAGE_EXTERNAL))) != MYKONOS_ERR_OK) {
-		errorString = getMykonosErrorMessage(mykError);
-		goto error_11;
-	}
-
-	if ((mykError = MYKONOS_waitInitCals(&mykDevice, 60000, &errorFlag,
-					     &errorCode)) != MYKONOS_ERR_OK) {
-		errorString = getMykonosErrorMessage(mykError);
-		goto error_11;
-	}
-
-	if ((errorFlag != 0) || (errorCode != 0)) {
-		/*** < Info: abort init cals > ***/
-		if ((mykError = MYKONOS_abortInitCals(&mykDevice,
-						      &initCalsCompleted)) != MYKONOS_ERR_OK) {
-			errorString = getMykonosErrorMessage(mykError);
-			goto error_11;
-		}
-		if (initCalsCompleted)
-			printf("Completed calibrations: %x\n", (unsigned int)initCalsCompleted);
-	} else
-		printf("Calibrations completed successfully\n");
-
-	/*************************************************************************/
-	/*****  Mykonos ARM Initialization External LOL Calibrations with PA *****/
-	/*************************************************************************/
-
-	/* Please ensure PA is enabled operational at this time */
-	if (initCalMask & TX_LO_LEAKAGE_EXTERNAL) {
-		if ((mykError = MYKONOS_runInitCals(&mykDevice,
-						    TX_LO_LEAKAGE_EXTERNAL)) != MYKONOS_ERR_OK) {
-			errorString = getMykonosErrorMessage(mykError);
-			goto error_11;
-		}
-
-		if ((mykError = MYKONOS_waitInitCals(&mykDevice, 60000, &errorFlag,
-						     &errorCode)) != MYKONOS_ERR_OK) {
-			errorString = getMykonosErrorMessage(mykError);
-			goto error_11;
-		}
-
-		if ((errorFlag != 0) || (errorCode != 0)) {
-			/*** < Info: abort init cals > ***/
-			if ((mykError = MYKONOS_abortInitCals(&mykDevice,
-							      &initCalsCompleted)) != MYKONOS_ERR_OK) {
-				errorString = getMykonosErrorMessage(mykError);
-				goto error_11;
-			}
-		} else
-			printf("External LOL Calibrations completed successfully\n");
-	}
-
-	/*************************************************************************/
-	/*****             SYSTEM JESD bring up procedure                    *****/
-	/*************************************************************************/
-
-	if ((mykError = MYKONOS_enableSysrefToRxFramer(&mykDevice,
-			1)) != MYKONOS_ERR_OK) {
-		errorString = getMykonosErrorMessage(mykError);
-		goto error_11;
-	}
-	/*** < Info: Mykonos is waiting for sysref in order to start
-	 * transmitting CGS from the RxFramer> ***/
-
-	if ((mykError = MYKONOS_enableSysrefToObsRxFramer(&mykDevice,
-			1)) != MYKONOS_ERR_OK) {
-		errorString = getMykonosErrorMessage(mykError);
-		goto error_11;
-	}
-	/*** < Info: Mykonos is waiting for sysref in order to start
-	 * transmitting CGS from the ObsRxFramer> ***/
-
-	if ((mykError = MYKONOS_enableSysrefToDeframer(&mykDevice,
-			0)) != MYKONOS_ERR_OK) {
-		errorString = getMykonosErrorMessage(mykError);
-		goto error_11;
-	}
-
-	if ((mykError = MYKONOS_resetDeframer(&mykDevice)) != MYKONOS_ERR_OK) {
-		errorString = getMykonosErrorMessage(mykError);
-		goto error_11;
-	}
-
-#ifndef ALTERA_PLATFORM
-	status = adxcvr_clk_enable(tx_adxcvr);
-	if (status != SUCCESS) {
-		printf("error: %s: adxcvr_clk_enable() failed\n", tx_adxcvr->name);
-		goto error_10;
-	}
-#endif
-	axi_jesd204_tx_lane_clk_enable(tx_jesd);
-
-	if ((mykError = MYKONOS_enableSysrefToDeframer(&mykDevice,
-			1)) != MYKONOS_ERR_OK) {
-		errorString = getMykonosErrorMessage(mykError);
-		goto error_11;
-	}
-
-	/*************************************************************************/
-	/*****            Enable SYSREF to Mykonos and BBIC                  *****/
-	/*************************************************************************/
-
-	/* Request a SYSREF from the AD9528 */
-	AD9528_requestSysref(clockAD9528_device, 1);
-	mdelay(1);
-
-	/*** < Info: Mykonos is actively transmitting CGS from the RxFramer> ***/
-
-	/*** < Info: Mykonos is actively transmitting CGS from the ObsRxFramer> ***/
-
-#ifndef ALTERA_PLATFORM
-	status = adxcvr_clk_enable(rx_adxcvr);
-	if (status != SUCCESS) {
-		printf("error: %s: adxcvr_clk_enable() failed\n", rx_adxcvr->name);
-		goto error_10;
-	}
-#endif
-	axi_jesd204_rx_lane_clk_enable(rx_jesd);
-#ifndef ALTERA_PLATFORM
-	status = adxcvr_clk_enable(rx_os_adxcvr);
-	if (status != SUCCESS) {
-		printf("error: %s: adxcvr_clk_enable() failed\n", rx_os_adxcvr->name);
-		goto error_10;
-	}
-#endif
-	axi_jesd204_rx_lane_clk_enable(rx_os_jesd);
-
-	/* Request two SYSREFs from the AD9528 */
-	AD9528_requestSysref(clockAD9528_device, 1);
-	mdelay(1);
-	AD9528_requestSysref(clockAD9528_device, 1);
-	mdelay(5);
-
-	/*************************************************************************/
-	/*****               Check Mykonos Framer Status                     *****/
-	/*************************************************************************/
-
-	if ((mykError = MYKONOS_readRxFramerStatus(&mykDevice,
-			&framerStatus)) != MYKONOS_ERR_OK) {
-		errorString = getMykonosErrorMessage(mykError);
-		goto error_11;
-	} else if (framerStatus != 0x3E)
-		printf("RxFramerStatus = 0x%x\n", framerStatus);
-
-	if ((mykError = MYKONOS_readOrxFramerStatus(&mykDevice,
-			&obsFramerStatus)) != MYKONOS_ERR_OK) {
-		errorString = getMykonosErrorMessage(mykError);
-		goto error_11;
-	} else if (obsFramerStatus != 0x3E)
-		printf("OrxFramerStatus = 0x%x\n", obsFramerStatus);
-
-	/*************************************************************************/
-	/*****               Check Mykonos Deframer Status                   *****/
-	/*************************************************************************/
-
-	if ((mykError = MYKONOS_readDeframerStatus(&mykDevice,
-			&deframerStatus)) != MYKONOS_ERR_OK) {
-		errorString = getMykonosErrorMessage(mykError);
-		goto error_11;
-	} else if (deframerStatus != 0x28)
-		printf("DeframerStatus = 0x%x\n", deframerStatus);
-
-	/*************************************************************************/
-	/*****           Mykonos enable tracking calibrations                *****/
-	/*************************************************************************/
-
-	if ((mykError = MYKONOS_enableTrackingCals(&mykDevice,
-			trackingCalMask)) != MYKONOS_ERR_OK) {
-		errorString = getMykonosErrorMessage(mykError);
-		goto error_11;
-	}
-
-	/*** < Info: Allow Rx1/2 QEC tracking and Tx1/2 QEC tracking to run when in the radioOn state
-	     *  Tx calibrations will only run if radioOn and the obsRx path is set to OBS_INTERNAL_CALS > ***/
-
-	/*** < Info: Function to turn radio on, Enables transmitters and receivers
-	 * that were setup during MYKONOS_initialize() > ***/
-	if ((mykError = MYKONOS_radioOn(&mykDevice)) != MYKONOS_ERR_OK) {
-		errorString = getMykonosErrorMessage(mykError);
-		goto error_11;
-	}
-
-	/*** < Info: Allow TxQEC to run when User: is not actively using ORx receive path > ***/
-	if ((mykError = MYKONOS_setObsRxPathSource(&mykDevice,
-			OBS_RXOFF)) != MYKONOS_ERR_OK) {
-		errorString = getMykonosErrorMessage(mykError);
-		goto error_11;
-	}
-	if ((mykError = MYKONOS_setObsRxPathSource(&mykDevice,
-			OBS_INTERNALCALS)) != MYKONOS_ERR_OK) {
-		errorString = getMykonosErrorMessage(mykError);
-		goto error_11;
-	}
-
-	axi_jesd204_rx_watchdog(rx_jesd);
-	axi_jesd204_rx_watchdog(rx_os_jesd);
+	
+// ##################################################3### JESD FRAMEWORK #####################################################
+	struct jesd204_dev *jdev;
+	status = jesd204_dev_register(&jdev, &jesd204_ad9371_init);
+	if (status < 0)
+		return status;
+// ##################################################3### JESD FRAMEWORK #####################################################
 
 	mdelay(1000);
 

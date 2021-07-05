@@ -31,7 +31,8 @@ SRCS += $(DRIVERS)/axi_core/axi_adc_core/axi_adc_core.c			\
 	$(DRIVERS)/axi_core/jesd204/axi_jesd204_tx.c			\
 	$(NO-OS)/util/util.c						\
 	$(DRIVERS)/spi/spi.c						\
-	$(DRIVERS)/gpio/gpio.c
+	$(DRIVERS)/gpio/gpio.c						\
+	$(DRIVERS)/jesd204/jesd204.c
 ifeq (xilinx,$(strip $(PLATFORM)))
 SRCS += $(DRIVERS)/axi_core/jesd204/xilinx_transceiver.c		\
 	$(DRIVERS)/axi_core/jesd204/axi_adxcvr.c			\
@@ -54,7 +55,7 @@ SRCS += $(PLATFORM_DRIVERS)/uart.c					\
 	$(PLATFORM_DRIVERS)/irq.c					\
 	$(NO-OS)/util/fifo.c						\
 	$(NO-OS)/util/list.c						\
-	$(DRIVERS)/axi_core/iio_axi_adc/iio_axi_adc.c				\
+	$(DRIVERS)/axi_core/iio_axi_adc/iio_axi_adc.c			\
 	$(DRIVERS)/axi_core/iio_axi_dac/iio_axi_dac.c
 endif
 INCS +=	$(PROJECT)/src/app/app_config.h					\
@@ -77,7 +78,10 @@ INCS += $(DRIVERS)/axi_core/axi_adc_core/axi_adc_core.h			\
 	$(DRIVERS)/axi_core/axi_dac_core/axi_dac_core.h			\
 	$(DRIVERS)/axi_core/axi_dmac/axi_dmac.h				\
 	$(DRIVERS)/axi_core/jesd204/axi_jesd204_rx.h			\
-	$(DRIVERS)/axi_core/jesd204/axi_jesd204_tx.h
+	$(DRIVERS)/axi_core/jesd204/axi_jesd204_tx.h			\
+	$(DRIVERS)/jesd204/device-states.h				\
+	$(DRIVERS)/jesd204/jesd204-priv.h				\
+	$(DRIVERS)/jesd204/jesd204.h
 ifeq (xilinx,$(strip $(PLATFORM)))
 INCS += $(DRIVERS)/axi_core/jesd204/xilinx_transceiver.h		\
 	$(DRIVERS)/axi_core/jesd204/axi_adxcvr.h			\
@@ -103,6 +107,6 @@ INCS += $(INCLUDE)/fifo.h						\
 	$(INCLUDE)/list.h						\
 	$(PLATFORM_DRIVERS)/irq_extra.h					\
 	$(PLATFORM_DRIVERS)/uart_extra.h				\
-	$(DRIVERS)/axi_core/iio_axi_adc/iio_axi_adc.h				\
+	$(DRIVERS)/axi_core/iio_axi_adc/iio_axi_adc.h			\
 	$(DRIVERS)/axi_core/iio_axi_dac/iio_axi_dac.h
 endif
